@@ -3,6 +3,7 @@ package com.mm.surrealdb;
 import com.mm.surrealdb.annotation.SurrealQuery;
 import com.surrealdb.driver.model.QueryResult;
 import org.aopalliance.intercept.MethodInterceptor;
+import org.aopalliance.intercept.MethodInvocation;
 import org.reflections.Reflections;
 import org.reflections.scanners.SubTypesScanner;
 import org.reflections.util.ClasspathHelper;
@@ -19,6 +20,7 @@ import java.lang.reflect.Type;
 import java.sql.SQLException;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -60,63 +62,99 @@ public class RepositoryInitializer implements BeanDefinitionRegistryPostProcesso
     }
 
     private <T, ID, R extends SurrealCrudRepository<T, ID>> void registerRepositoryBean(Class<T> entityType, BeanDefinitionRegistry registry, Class<R> repositoryClass) {
+        ProxyFactory proxyFactory = createProxyFactory(repositoryClass, entityType);
+        AbstractBeanDefinition beanDefinition = createBeanDefinition(repositoryClass, proxyFactory);
+        registry.registerBeanDefinition(repositoryClass.getSimpleName(), beanDefinition);
+    }
+
+    private <T, ID, R extends SurrealCrudRepository<T, ID>> ProxyFactory createProxyFactory(Class<R> repositoryClass, Class<T> entityType) {
+        SurrealCrudRepositoryImpl<T, ID> target = new SurrealCrudRepositoryImpl<>(entityType);
         ProxyFactory proxyFactory = new ProxyFactory();
         proxyFactory.addInterface(repositoryClass);
-        SurrealCrudRepositoryImpl<T, ID> target = new SurrealCrudRepositoryImpl<>(entityType);
+        proxyFactory.addAdvice((MethodInterceptor) invocation -> handleMethodInvocation(invocation, target));
+        return proxyFactory;
+    }
 
-        proxyFactory.addAdvice((MethodInterceptor) invocation -> {
-            Method method = invocation.getMethod();
-            if (method.isAnnotationPresent(SurrealQuery.class)) {
-                String query = method.getAnnotation(SurrealQuery.class).value();
-                Object[] args = invocation.getArguments();
-                Pattern pattern = Pattern.compile("\\?(\\d+)");
-                Matcher matcher = pattern.matcher(query);
-                StringBuffer sb = new StringBuffer();
-                int argIndex = 0;
+    private <T, ID> Object handleMethodInvocation(MethodInvocation invocation, SurrealCrudRepositoryImpl<T, ID> target) throws Throwable {
+        Method method = invocation.getMethod();
+        if (method.isAnnotationPresent(SurrealQuery.class)) {
+            return handleSurrealQuery(invocation, method);
+        } else {
+            return method.invoke(target, invocation.getArguments());
+        }
+    }
 
-                while (matcher.find()) {
-                    int index = Integer.parseInt(matcher.group(1)) - 1;
-                    if (index >= args.length) {
-                        throw new SQLException("Argument index out of bounds: " + (index + 1));
-                    }
-                    String replacement = args[index] instanceof String ? "'" + escapeReplacement(args[index].toString()) + "'" : args[index].toString();
-                    matcher.appendReplacement(sb, replacement);
-                    argIndex++;
-                }
-                matcher.appendTail(sb);
-
-                if (argIndex != args.length) {
-                    throw new SQLException("Number of placeholders in the query doesn't match the number of arguments.");
-                }
-                String processedQuery = sb.toString();
-                Type returnType = method.getGenericReturnType();
-                if (returnType instanceof ParameterizedType) {
-                    Type[] typeArguments = ((ParameterizedType) returnType).getActualTypeArguments();
-                    if (typeArguments.length > 0 && typeArguments[0] instanceof Class<?> genericClass) {
-                        return getRepoDriver().query(processedQuery, Collections.emptyMap(), genericClass);
-                    }
-                } else {
-                    List<QueryResult<T>> results = getRepoDriver().query(processedQuery, Collections.emptyMap(), (Class<? extends T>) returnType);
-                    var result = results.stream()
-                        .flatMap(qr -> qr.getResult().stream())
-                        .toList();
-                    if (result.isEmpty()) {
-                        return null;
-                    }
-                    return result.get(0);
-                }
-                throw new SQLException("Unsupported return type for method: " + method.getName());
-            } else {
-                return invocation.getMethod().invoke(target, invocation.getArguments());
+    private Object handleSurrealQuery(MethodInvocation invocation, Method method) throws SQLException {
+        String query = method.getAnnotation(SurrealQuery.class).value();
+        Object[] args = invocation.getArguments();
+        Pattern pattern = Pattern.compile("\\?(\\d+)");
+        Matcher matcher = pattern.matcher(query);
+        StringBuilder sb = new StringBuilder();
+        int argIndex = 0;
+        while (matcher.find()) {
+            int index = Integer.parseInt(matcher.group(1)) - 1;
+            if (index >= args.length) {
+                throw new SQLException(String.format("Argument index out of bounds: %d", (index + 1)));
             }
-        });
+            String replacement = args[index] instanceof String ? "'" + escapeReplacement(args[index].toString()) + "'" : args[index].toString();
+            matcher.appendReplacement(sb, replacement);
+            argIndex++;
+        }
+        matcher.appendTail(sb);
+        if (argIndex != args.length) {
+            throw new SQLException("Number of placeholders in the query doesn't match the number of arguments.");
+        }
+        String processedQuery = sb.toString();
+        Type returnType = method.getGenericReturnType();
+        return processReturnType(returnType, processedQuery, method);
+    }
 
-        R repositoryProxy = (R) proxyFactory.getProxy();
-        AbstractBeanDefinition beanDefinition = BeanDefinitionBuilder
-            .genericBeanDefinition(repositoryClass, () -> repositoryProxy)
-            .getBeanDefinition();
+    private Object processReturnType(Type returnType, String processedQuery, Method method) throws SQLException {
+        if (returnType instanceof ParameterizedType) {
+            Type[] typeArguments = ((ParameterizedType) returnType).getActualTypeArguments();
+            if (typeArguments.length > 0 && typeArguments[0] instanceof Class<?> genericClass) {
+                System.out.println(genericClass);
+                return processGenericReturnType((ParameterizedType) returnType, processedQuery, genericClass);
+            }
+        } else {
+            return processNonParameterizedReturnType(processedQuery, returnType);
+        }
+        throw new SQLException(String.format("Unsupported return type for method: %s", method.getName()));
+    }
 
-        registry.registerBeanDefinition(repositoryClass.getSimpleName(), beanDefinition);
+    private Object processGenericReturnType(ParameterizedType returnType, String processedQuery, Type genericClassType) {
+        final Class<?> rawType = (Class<?>) returnType.getRawType();
+        Class<?> genericClass = (Class<?>) genericClassType;
+        if (rawType.equals(List.class)) {
+            return getRepoDriver().query(processedQuery, Collections.emptyMap(), genericClass)
+                    .stream()
+                    .flatMap(qr -> qr.getResult().stream())
+                    .toList();
+        } else if (rawType.equals(Optional.class)) {
+            return getRepoDriver().query(processedQuery, Collections.emptyMap(), genericClass)
+                    .stream()
+                    .flatMap(qr -> qr.getResult().stream())
+                    .findFirst();
+        } else {
+            return getRepoDriver().query(processedQuery, Collections.emptyMap(), genericClass);
+        }
+    }
+
+    private <T> Object processNonParameterizedReturnType(String processedQuery, Type returnType) {
+        List<QueryResult<T>> results = getRepoDriver().query(processedQuery, Collections.emptyMap(), (Class<? extends T>) returnType);
+        var result = results.stream()
+                .flatMap(qr -> qr.getResult().stream())
+                .toList();
+        if (result.isEmpty()) {
+            return null;
+        }
+        return result.get(0);
+    }
+
+    private <T, ID, R extends SurrealCrudRepository<T, ID>> AbstractBeanDefinition createBeanDefinition(Class<R> repositoryClass, ProxyFactory proxyFactory) {
+        return BeanDefinitionBuilder
+                .genericBeanDefinition(repositoryClass, () -> repositoryClass.cast(proxyFactory.getProxy()))
+                .getBeanDefinition();
     }
 
     private static String escapeReplacement(String replacement) {

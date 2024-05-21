@@ -17,10 +17,14 @@ I have created an implementation which will expect the following to use reposito
 
 > surrealdb.database=test
 
+> surrealdb.username=test
+
+> surrealdb.password=test
+
 
 2.  Entity Annotation with @SurrealTable and @SurrealId: Entities can now be annotated to define document/table mappings and identifiers, simplifying the mapping process. For example:
 
-```
+```java
 @SurrealTable("parent_route")
 @AllArgsConstructor
 @Data
@@ -39,7 +43,7 @@ public class ParentRoute {
 
 3. CRUD Operations through SurrealCrudRepository: Entities can extend the SurrealCrudRepository interface to enable CRUD operations, streamlining data manipulation tasks:
 
-```
+```java
 @Repository
 public interface ParentRouteRepository extends SurrealCrudRepository<ParentRoute,String> {
 }
@@ -47,7 +51,7 @@ public interface ParentRouteRepository extends SurrealCrudRepository<ParentRoute
 
 4. Custom Queries with @SurrealQuery: Similar to JPA's @Query annotation, @SurrealQuery enables the execution of custom queries, providing flexibility in data retrieval:
 
-```
+```java
 @Repository
 public interface ParentRouteRepository extends SurrealCrudRepository<ParentRoute,String> {
 

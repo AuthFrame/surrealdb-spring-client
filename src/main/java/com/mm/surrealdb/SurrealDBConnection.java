@@ -16,6 +16,9 @@ public class SurrealDBConnection {
     private static final String nameSpace;
     private static final String database;
 
+    private static final String username;
+    private static final String password;
+
     static {
         Properties properties = new Properties();
         try {
@@ -25,6 +28,8 @@ public class SurrealDBConnection {
             useSsl = Boolean.parseBoolean(properties.getProperty("surrealdb.useSsl", "false"));
             nameSpace = properties.getProperty("surrealdb.nameSpace", "test");
             database = properties.getProperty("surrealdb.database", "test") ;
+            username = properties.getProperty("surrealdb.username", null);
+            password = properties.getProperty("surrealdb.password", null);
         } catch (IOException e) {
             throw new RuntimeException("Failed to load surrealdb.properties", e);
         }
@@ -38,6 +43,9 @@ public class SurrealDBConnection {
             SurrealConnection conn = new SurrealWebSocketConnection(host, port, useSsl);
             conn.connect(5);
             driver = new SyncSurrealDriver(conn);
+            if(username != null && password != null)
+                driver.signIn(username, password);
+
             driver.use(nameSpace, database);
         }
         return driver;
