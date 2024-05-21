@@ -17,9 +17,9 @@ I have created an implementation which will expect the following to use reposito
 
 > surrealdb.database=test
 
-> surrealdb.username=test
+> surrealdb.username=test **(optional)**
 
-> surrealdb.password=test
+> surrealdb.password=test **(optional)**
 
 
 2.  Entity Annotation with @SurrealTable and @SurrealId: Entities can now be annotated to define document/table mappings and identifiers, simplifying the mapping process. For example:
